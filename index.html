@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MDA Auth Prototype</title>
+<style>
+  :root { --bg:#ffffff; --fg:#1b1f23; --muted:#57606a; --line:#d0d7de; --ok:#1a7f37; --bad:#b42318; --btn:#0b5cad; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14181c; --fg:#e8ecef; --muted:#9aa5b1; --line:#2f3942; --ok:#4ac26b; --bad:#ff8a80; --btn:#5aa9ff; } }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--fg); margin:0; padding:16px; line-height:1.5; }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; }
+  p.note { color:var(--muted); margin:4px 0 16px; font-size:.92rem; }
+  section { border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px; }
+  h2 { font-size:1rem; margin:0 0 8px; }
+  button { font:inherit; padding:10px 14px; margin:4px 6px 4px 0; border:1px solid var(--btn); background:transparent; color:var(--btn); border-radius:6px; cursor:pointer; min-height:44px; }
+  button:focus-visible, input:focus-visible { outline:3px solid var(--btn); outline-offset:2px; }
+  input { font:inherit; padding:10px; width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; background:transparent; color:var(--fg); }
+  label { display:block; font-size:.9rem; margin:8px 0 4px; }
+  pre { white-space:pre-wrap; word-break:break-word; background:transparent; border:1px solid var(--line); border-radius:6px; padding:10px; min-height:90px; margin:8px 0 0; }
+  .status { font-weight:600; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1>MDA authentication prototype</h1>
+  <p class="note">Test page only. It contains no client data. Page type: <strong id="pagetype"></strong></p>
+
+  <section aria-labelledby="s1">
+    <h2 id="s1">1. Sign in</h2>
+    <div id="gbtn"></div>
+    <p id="signin-status" class="status" role="status">Loading Google sign-in…</p>
+    <p class="note">Page origin (record this if sign-in fails): <code id="origin"></code></p>
+  </section>
+
+  <section aria-labelledby="s2">
+    <h2 id="s2">2. Normal requests</h2>
+    <button type="button" id="b-who">Who am I?</button>
+    <button type="button" id="b-read">Read my demo records</button>
+    <button type="button" id="b-admin">Owner-only action</button>
+  </section>
+
+  <section aria-labelledby="s3">
+    <h2 id="s3">3. Attack tests (each should be rejected)</h2>
+    <button type="button" id="b-none">Send with no token</button>
+    <button type="button" id="b-replay">Re-send last token (use after 65+ minutes)</button>
+    <label for="victim">Owner email to impersonate with a tampered token</label>
+    <input id="victim" type="email" placeholder="owner@gmail.com" autocomplete="off">
+    <button type="button" id="b-tamper">Send tampered token</button>
+  </section>
+
+  <section aria-labelledby="s4">
+    <h2 id="s4">Result</h2>
+    <pre id="out" aria-live="polite">Nothing sent yet.</pre>
+  </section>
+</main>
+
+<script>
+// EDIT THESE TWO LINES (see SPIKE_SETUP.md, Part 5). Neither value is a secret.
+var SPIKE_CONFIG = { clientId:461697864890-bmk6bkjsg9l0rti3sslabmiiglb1iado.apps.googleusercontent.com, apiUrl: https://script.google.com/macros/s/AKfycbx1EKA6mnnBFWpnGoefFsuW7R3ZnUQaA_0gLNI9-log0ji4M4C5-Bpazdjzm2VRhbC1/exec, mode: 'EXTERNAL_PAGE' };
+
+var currentToken = null, lastToken = null;
+var $ = function (id) { return document.getElementById(id); };
+$('pagetype').textContent = SPIKE_CONFIG.mode;
+$('origin').textContent = window.location.origin;
+
+function show(obj) { $('out').textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2); }
+
+function b64urlDecode(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '=';
+  return decodeURIComponent(escape(atob(s)));
+}
+function b64urlEncode(str) {
+  return btoa(unescape(encodeURIComponent(str))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function callApi(action, token) {
+  var payload = { action: action };
+  if (token) payload.idToken = token;
+  show('Sending…');
+  if (SPIKE_CONFIG.mode === 'APPS_SCRIPT_PAGE') {
+    google.script.run
+      .withSuccessHandler(show)
+      .withFailureHandler(function (e) { show({ clientError: String((e && e.message) || e) }); })
+      .apiCall(payload);
+  } else {
+    fetch(SPIKE_CONFIG.apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // avoids a CORS pre-flight request
+      body: JSON.stringify(payload),
+      redirect: 'follow'
+    }).then(function (r) { return r.text(); })
+      .then(function (t) { try { show(JSON.parse(t)); } catch (e) { show('Non-JSON reply (record this):\n' + t.slice(0, 600)); } })
+      .catch(function (e) { show({ clientError: String(e) }); });
+  }
+}
+
+function onCredential(resp) {
+  currentToken = resp.credential; lastToken = resp.credential;
+  var p = JSON.parse(b64urlDecode(currentToken.split('.')[1]));
+  $('signin-status').className = 'status ok';
+  $('signin-status').textContent = 'Signed in with Google as ' + p.email + '. Not yet checked by the server.';
+}
+
+function initGoogle() {
+  if (!window.google || !google.accounts || !google.accounts.id) {
+    $('signin-status').className = 'status bad';
+    $('signin-status').textContent = 'Google sign-in library did not load. Record this as a failure.';
+    return;
+  }
+  google.accounts.id.initialize({ client_id: SPIKE_CONFIG.clientId, callback: onCredential, auto_select: false });
+  google.accounts.id.renderButton($('gbtn'), { theme: 'outline', size: 'large', text: 'signin_with' });
+  $('signin-status').textContent = 'Not signed in. Use the Google button above.';
+  setTimeout(function () {
+    if (!$('gbtn').children.length) {
+      $('signin-status').className = 'status bad';
+      $('signin-status').textContent = 'The Google button did not appear. Record this as a failure and note the origin below.';
+    }
+  }, 5000);
+}
+
+function needToken() {
+  if (!currentToken) { show('Sign in first.'); return false; }
+  return true;
+}
+
+$('b-who').onclick   = function () { if (needToken()) callApi('whoami', currentToken); };
+$('b-read').onclick  = function () { if (needToken()) callApi('readDemo', currentToken); };
+$('b-admin').onclick = function () { if (needToken()) callApi('adminPing', currentToken); };
+$('b-none').onclick  = function () { callApi('whoami', null); };
+$('b-replay').onclick = function () { if (!lastToken) { show('Sign in first.'); return; } callApi('whoami', lastToken); };
+$('b-tamper').onclick = function () {
+  if (!needToken()) return;
+  var victim = $('victim').value.trim();
+  if (!victim) { show('Type the owner email first.'); return; }
+  var parts = currentToken.split('.');
+  var payload = JSON.parse(b64urlDecode(parts[1]));
+  payload.email = victim;
+  callApi('whoami', parts[0] + '.' + b64urlEncode(JSON.stringify(payload)) + '.' + parts[2]);
+};
+
+var s = document.createElement('script');
+s.src = 'https://accounts.google.com/gsi/client'; s.async = true; s.defer = true;
+s.onload = initGoogle;
+s.onerror = function () { $('signin-status').className = 'status bad'; $('signin-status').textContent = 'Could not load Google sign-in library (blocked or offline). Record this as a failure.'; };
+document.head.appendChild(s);
+</script>
+</body>
+</html>
